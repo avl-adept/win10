@@ -1,0 +1,212 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "configName": {
+            "type": "string",
+            "metadata": {
+                "description": "The name of the deployment."
+            },
+            "defaultValue": "AVL-WIN10"
+        },
+        "vmSize": {
+            "type": "string",
+            "metadata": {
+                "description": "Select a VM size for all VMs in your deployment."
+            },
+            "allowedValues": [
+                "Standard_DS2_v1",
+                "Standard_DS2_v2",
+                "Standard_DS2_v3"
+            ],
+            "defaultValue": "Standard_DS2_v2"
+        },
+        "dnsLabelPrefix": {
+            "type": "string",
+            "metadata": {
+                "description": "DNS label prefix for public IPs."
+            }
+        },
+        "_artifactsLocation": {
+            "type": "string",
+            "metadata": {
+                "description": "Location for DSC and nested template resoucces."
+            },
+            "defaultValue": "https://raw.githubusercontent.com/avl-adept/win10/master"
+        }
+    },
+
+    "variables": {
+
+        "assetLocation": "[concat(parameters('_artifactsLocation'),'/DSC')]",
+        "templates": "[concat(parameters('_artifactsLocation'),'/nested')]",
+        "storageAccountName": "[concat(uniqueString(resourceGroup().id),'storage')]",
+
+        "network": {
+            "vnetName": "[concat(parameters('configName'),'-VNET')]",
+            "subnetRef": "[resourceId('Microsoft.Network/virtualNetworks/subnets', concat(parameters('configName'),'-VNET'), 'subnet-01')]",
+            "subnet": "10.0.0.0/8",
+            "nsgName": "[concat(parameters('configName'),'-NSG')]"
+        },
+
+        "VMs": {
+            "cliVmName": "CLIENT-NUG",
+            "clientNicIP": "10.0.0.12",
+            "cliPublicIpName": "[concat(parameters('configName'),'-CLI_IP')]"
+        },
+
+        "SharedVmConfig": {
+            "location": "[resourceGroup().location]",
+            "vmSize": "[parameters('vmSize')]",
+            "storageAccountNamePrefix": "[variables('storageAccountName')]"
+        }
+    },
+
+    "resources": [
+        {
+            "apiVersion": "2018-01-01",
+            "type": "Microsoft.Network/networkSecurityGroups",
+            "name": "[variables('network').nsgName]",
+            "location": "[resourceGroup().location]",
+            "tags": {
+                "displayName": "NSG - RDP"
+            },
+            "comments": "This network security group enables RDP on port 3389.",
+            "properties": {
+                "securityRules": [
+                    {
+                        "name": "rdp-rule",
+                        "properties": {
+                            "description": "Allow RDP",
+                            "protocol": "Tcp",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "3389",
+                            "sourceAddressPrefix": "Internet",
+                            "destinationAddressPrefix": "*",
+                            "access": "Allow",
+                            "priority": 100,
+                            "direction": "Inbound"
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "name": "[variables('network').vnetName]",
+            "type": "Microsoft.Network/virtualNetworks",
+            "dependsOn": [
+                "[concat('Microsoft.Network/networkSecurityGroups/',variables('network').nsgName)]"
+            ],
+            "location": "[resourceGroup().location]",
+            "apiVersion": "2018-01-01",
+            "comments": "This is the virtual network for the deployment.",
+            "properties": {
+                "addressSpace": {
+                    "addressPrefixes": [
+                        "[variables('network').subnet]"
+                    ]
+                },
+                "dhcpOptions": {
+                    "dnsServers": "[variables('VMs').adNicIP]"
+                },
+                "subnets": [
+                    {
+                        "name": "subnet-01",
+                        "properties": {
+                            "addressPrefix": "[variables('network').subnet]",
+                            "networkSecurityGroup": {
+                                "id": "[resourceId('Microsoft.Network/networkSecurityGroups',variables('network').nsgName)]"
+                            }
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.Storage/storageAccounts",
+            "name": "[variables('storageAccountName')]",
+            "apiVersion": "2017-06-01",
+            "location": "[resourceGroup().location]",
+            "kind": "Storage",
+            "comments": "This storage account contains VHDs for VMs in the deployment.",
+            "sku": {
+                "name": "Standard_LRS"
+            }
+        },
+        {
+            "apiVersion": "2017-06-01",
+            "type": "Microsoft.Network/publicIPAddresses",
+            "name": "[variables('VMs').cliPublicIpName]",
+            "location": "[resourceGroup().location]",
+            "comments": "This is the public IP address for the client VM.",
+            "properties": {
+                "publicIPAllocationMethod": "Static",
+                "dnsSettings": {
+                    "domainNameLabel": "[toLower(concat(parameters('dnsLabelPrefix'),'cli'))]"
+                }
+            }
+        },
+        {
+            "name": "[concat(parameters('configName'),'-CLI_NIC')]",
+            "type": "Microsoft.Network/networkInterfaces",
+            "location": "[resourceGroup().location]",
+            "dependsOn": [
+                "[concat('Microsoft.Network/virtualNetworks/',parameters('configName'),'-vnet')]"
+            ],
+            "apiVersion": "2018-01-01",
+            "comments": "This is the network interface for the client VM.",
+            "properties": {
+                "ipConfigurations": [
+                    {
+                        "name": "ipconfig1",
+                        "properties": {
+                            "privateIPAllocationMethod": "Static",
+                            "privateIPAddress": "[variables('VMs').clientNicIP]",
+                            "publicIPAddress": {
+                                "id": "[resourceId ('Microsoft.Network/publicIPAddresses/',variables('VMs').cliPublicIpName)]"
+                            },
+                            "subnet": {
+                                "id": "[variables('network').subnetRef]"
+                            }
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "name": "CLIENT-NUG",
+            "type": "Microsoft.Resources/deployments",
+            "apiVersion": "2015-01-01",
+            "comments": "This is the deployment resource for the client VM.",
+            "properties": {
+                "mode": "Incremental",
+                "templateLink": {
+                    "uri": "[concat(variables('templates'),'/client-nug.json')]",
+                    "contentVersion": "1.0.0.0"
+                },
+                "parameters": {
+                    "SharedVmConfig": {
+                        "value": "[variables('SharedVmConfig')]"
+                    },
+                    "vmName": {
+                        "value": "[variables('VMs').cliVmName]"
+                    },
+                    "nicName": {
+                        "value": "[concat(parameters('configName'),'-CLI_NIC')]"
+                    }
+                }
+            }
+        }
+    ],
+
+    "outputs": {
+        "CliPublicIpAddress": {
+            "type": "string",
+            "value": "[reference(variables('VMs').cliPublicIpName).ipAddress]"
+        },
+        "CliFqdn": {
+            "type": "string",
+            "value": "[reference(variables('VMs').cliPublicIpName).dnsSettings.fqdn]"
+        }
+    }
+}
